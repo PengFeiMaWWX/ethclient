@@ -1,0 +1,117 @@
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"fmt"
+	"log"
+	"math/big"
+
+	"golang.org/x/crypto/sha3"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+)
+
+func main() {
+	// 1. 连接以太坊节点（这里连接的是Sepolia测试网）
+	// 实际使用时需要替换为有效的Alchemy项目ID或Infura端点
+	client, err := ethclient.Dial("https://eth-sepolia.g.alchemy.com/v2/")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 2. 从私钥推导出公钥和地址
+	// 注意：在实际使用中，私钥应妥善保管，不要硬编码在代码中
+	privateKey, err := crypto.HexToECDSA("账户私钥")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+	}
+
+	// 从公钥推导出钱包地址（交易发送方）
+	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	// 3. 获取账户nonce（交易计数器）
+	nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	value := big.NewInt(0)                                        // 转账的ETH金额（这里为0，因为是代币转账而非ETH转账）
+	gasPrice, err := client.SuggestGasPrice(context.Background()) // 获取建议的gas价格
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 4. 设置接收方地址和代币合约地址
+	toAddress := common.HexToAddress("0x4592d8f8d7b001e72cb26a73e4fa1806a51ac79d")
+	tokenAddress := common.HexToAddress("0x28b149020d2152179873ec60bed6bf7cd705775d")
+
+	// 5. 构造transfer函数的调用数据
+	// 函数选择器：取函数签名的Keccak256哈希的前4个字节[7](@ref)
+	transferFnSignature := []byte("transfer(address,uint256)")
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(transferFnSignature)
+	methodID := hash.Sum(nil)[:4]         // 取前4字节作为方法ID
+	fmt.Println(hexutil.Encode(methodID)) // 输出: 0xa9059cbb
+
+	// 编码参数：地址（填充到32字节）
+	paddedAddress := common.LeftPadBytes(toAddress.Bytes(), 32)
+	fmt.Println(hexutil.Encode(paddedAddress))
+
+	// 编码参数：转账金额（填充到32字节）
+	// 将金额填充到32字节（256位）长，主要是为了满足底层区块链系统在处理大数值时的一致性、安全性和兼容性需求
+	amount := new(big.Int)
+	amount.SetString("1000000000000000000000", 10) // 1000个代币（假设代币有18位小数）
+	paddedAmount := common.LeftPadBytes(amount.Bytes(), 32)
+	fmt.Println(hexutil.Encode(paddedAmount))
+
+	// 组合调用数据：方法ID + 参数
+	var data []byte
+	data = append(data, methodID...)
+	data = append(data, paddedAddress...)
+	data = append(data, paddedAmount...)
+
+	// 6. 估算Gas限制
+	gasLimit, err := client.EstimateGas(context.Background(), ethereum.CallMsg{
+		To:   &toAddress, // 注意：这里应该是代币合约地址，但代码中写的是接收方地址
+		Data: data,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(gasLimit)
+
+	// 7. 创建交易对象[8](@ref)
+	// 注意：Recipient（接收方）是代币合约地址，因为调用的是合约的transfer函数
+	tx := types.NewTransaction(nonce, tokenAddress, value, gasLimit, gasPrice, data)
+
+	// 8. 签名交易（使用EIP155签名器）
+	chainID, err := client.NetworkID(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 9. 发送交易
+	err = client.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("tx sent: %s", signedTx.Hash().Hex())
+}
